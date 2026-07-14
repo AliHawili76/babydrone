@@ -1,1 +1,6 @@
-# babydrone
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+models/*.task
