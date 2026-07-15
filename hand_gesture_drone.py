@@ -1,90 +1,195 @@
 """
-Pico W firmware (MicroPython) — Hand-Gesture Drone Flight
-CSIS-418 | Team Ginyard International Co.
+Hand-Gesture Drone Flight — two-hand, seven-state controller
+CSIS-418
 
-Extends pattssun/iDrone's single-channel version. Reads
-"throttle,leftright,forwardback,yaw\n" over USB serial and writes the first
-three values to MCP4728 DAC channels A, B, C. Channel D is reserved for a
-future yaw axis and is always written as neutral (2048).
+Extends pattssun/iDrone (github.com/pattssun/iDrone), which does single-hand,
+three-state throttle only (right hand: climb / descend / hover).
 
-500ms watchdog: if no fresh packet arrives in time, all channels snap to
-2048 (neutral/hover) so the drone fails safe.
+This version adds a second, independent channel driven by the left hand:
+  - thumb angle vs. horizontal  -> left / right
+  - count of extended non-thumb fingers -> forward (1) / backward (2)
 
-Wiring (same I2C bus as base repo):
-    Pico GP4 -> DAC SDA
-    Pico GP5 -> DAC SCL
-    Pico 3V3 -> DAC VIN
-    Pico GND -> DAC GND (and shared with remote ground)
-DAC I2C address: 0x60
+Right hand throttle logic is unchanged from the base repo.
 
-Hardware note: this build targets a JJRC H36 remote, not the HS210 used in
-the base repo. Pad locations are NOT the same — verify with a multimeter
-(continuity + voltage swing) before soldering, exactly as described in the
-iDrone README's "Find the right pads" step.
-    Channel A output -> throttle pad
-    Channel B output -> roll (left/right) pad
-    Channel C output -> pitch (forward/backward) pad
+Usage:
+    python hand_gesture_drone.py --no-serial   # visuals only, no Pico needed
+    python hand_gesture_drone.py               # streams to Pico over USB serial
 """
 
-from machine import Pin, I2C
-import sys
-import select
+import argparse
+import math
 import time
 
-I2C_SDA = 4
-I2C_SCL = 5
-DAC_ADDR = 0x60
-NEUTRAL = 2048
-WATCHDOG_MS = 500
+import cv2
+import mediapipe as mp
+import numpy as np
+import serial
 
-i2c = I2C(0, sda=Pin(I2C_SDA), scl=Pin(I2C_SCL), freq=400_000)
+MODEL_PATH = "models/hand_landmarker.task"
+SERIAL_PORT = "/dev/ttyACM0"   # change on Windows to e.g. "COM5"
+BAUD = 115200
+EMA_ALPHA = 0.3
+CENTER = 2048
+MAX_VAL = 4095
+MIN_VAL = 0
+
+# MediaPipe landmark indices
+WRIST = 0
+THUMB_TIP, THUMB_IP = 4, 3
+FINGER_TIPS = {"index": 8, "middle": 12, "ring": 16, "pinky": 20}
+FINGER_PIPS = {"index": 6, "middle": 10, "ring": 14, "pinky": 18}
+FINGER_MCPS = {"index": 5, "middle": 9, "ring": 13, "pinky": 17}
 
 
-def write_channel(channel: int, value: int):
-    """channel: 0=A, 1=B, 2=C, 3=D. value: 0-4095."""
-    value = max(0, min(4095, value))
-    # MCP4728 fast-write style single-channel command
-    high_byte = (channel << 5) | 0x00 | ((value >> 8) & 0x0F)
-    low_byte = value & 0xFF
-    i2c.writeto(DAC_ADDR, bytes([0x58 | channel, high_byte, low_byte]))
+class AxisSmoother:
+    """Per-axis EMA smoothing, ~300ms ramp at 0.3 alpha / 30fps."""
+    def __init__(self, initial=CENTER):
+        self.value = float(initial)
+
+    def update(self, target):
+        self.value = EMA_ALPHA * target + (1 - EMA_ALPHA) * self.value
+        return int(self.value)
 
 
-def write_all(throttle, leftright, fwdback, yaw=NEUTRAL):
-    write_channel(0, throttle)
-    write_channel(1, leftright)
-    write_channel(2, fwdback)
-    write_channel(3, yaw)
+def angle_from_vertical(dx, dy):
+    return math.degrees(math.atan2(abs(dx), -dy))
+
+
+def angle_from_horizontal(dx, dy):
+    return math.degrees(math.atan2(abs(dy), abs(dx)))
+
+
+def classify_throttle(landmarks):
+    """Right hand: fingers up/down/fist -> climb/descend/hover. (base repo logic)"""
+    up_count, down_count = 0, 0
+    tip_to_wrist_total, pip_to_wrist_total = 0.0, 0.0
+    wrist = landmarks[WRIST]
+
+    for name in ("index", "middle", "ring", "pinky"):
+        tip = landmarks[FINGER_TIPS[name]]
+        pip = landmarks[FINGER_PIPS[name]]
+        dx, dy = tip.x - wrist.x, tip.y - wrist.y
+        ang = angle_from_vertical(dx, dy)
+        if ang <= 45:
+            up_count += 1
+        elif ang >= 135:
+            down_count += 1
+        tip_to_wrist_total += math.hypot(tip.x - wrist.x, tip.y - wrist.y)
+        pip_to_wrist_total += math.hypot(pip.x - wrist.x, pip.y - wrist.y)
+
+    openness = tip_to_wrist_total / max(pip_to_wrist_total, 1e-6)
+
+    if openness < 1.3:
+        return CENTER, "hover"
+    if up_count == 4:
+        return MAX_VAL, "climb"
+    if down_count == 4:
+        return MIN_VAL, "descend"
+    return CENTER, "hover"
+
+
+def classify_direction(landmarks):
+    """Left hand: thumb angle -> left/right, finger count -> forward/backward."""
+    wrist = landmarks[WRIST]
+    thumb_tip = landmarks[THUMB_TIP]
+
+    # left/right from thumb angle vs horizontal
+    dx, dy = thumb_tip.x - wrist.x, thumb_tip.y - wrist.y
+    thumb_ang = angle_from_horizontal(dx, dy)
+    if thumb_ang <= 45:
+        leftright = MIN_VAL if dx < 0 else MAX_VAL   # note: mirror if camera is unflipped
+        lr_label = "left" if dx < 0 else "right"
+    else:
+        leftright, lr_label = CENTER, "neutral"
+
+    # forward/backward from extended non-thumb finger count
+    extended = 0
+    for name in ("index", "middle", "ring", "pinky"):
+        tip = landmarks[FINGER_TIPS[name]]
+        pip = landmarks[FINGER_PIPS[name]]
+        mcp = landmarks[FINGER_MCPS[name]]
+        if tip.y < pip.y < mcp.y:   # tip clearly above pip clearly above mcp = extended
+            extended += 1
+
+    if extended == 1:
+        fwdback, fb_label = MAX_VAL, "forward"
+    elif extended == 2:
+        fwdback, fb_label = MIN_VAL, "backward"
+    else:
+        fwdback, fb_label = CENTER, "neutral"
+
+    return leftright, fwdback, f"{lr_label}/{fb_label}"
 
 
 def main():
-    write_all(NEUTRAL, NEUTRAL, NEUTRAL, NEUTRAL)
-    last_packet_ms = time.ticks_ms()
-    poll = select.poll()
-    poll.register(sys.stdin, select.POLLIN)
-    buf = ""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-serial", action="store_true", help="visuals only, no Pico")
+    args = parser.parse_args()
 
-    while True:
-        now = time.ticks_ms()
+    ser = None
+    if not args.no_serial:
+        ser = serial.Serial(SERIAL_PORT, BAUD, timeout=0.1)
+        time.sleep(2)  # let the Pico reset
 
-        if poll.poll(0):
-            chunk = sys.stdin.read(1)
-            if chunk == "\n":
-                try:
-                    parts = [int(p) for p in buf.strip().split(",")]
-                    if len(parts) == 4:
-                        throttle, leftright, fwdback, yaw = parts
-                        write_all(throttle, leftright, fwdback, yaw)
-                        last_packet_ms = now
-                except ValueError:
-                    pass
-                buf = ""
-            else:
-                buf += chunk
+    base_options = mp.tasks.BaseOptions(model_asset_path=MODEL_PATH)
+    options = mp.tasks.vision.HandLandmarkerOptions(
+        base_options=base_options,
+        num_hands=2,
+        min_hand_detection_confidence=0.6,
+        min_tracking_confidence=0.6,
+    )
+    landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
 
-        if time.ticks_diff(now, last_packet_ms) > WATCHDOG_MS:
-            write_all(NEUTRAL, NEUTRAL, NEUTRAL, NEUTRAL)
+    throttle_smoother = AxisSmoother()
+    leftright_smoother = AxisSmoother()
+    fwdback_smoother = AxisSmoother()
 
-        time.sleep_ms(5)
+    cap = cv2.VideoCapture(0)
+    frame_idx = 0
+
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame = cv2.flip(frame, 1)  # mirror so left/right feel natural
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            result = landmarker.detect_for_video(mp_image, frame_idx)
+            frame_idx += 1
+
+            throttle_target, leftright_target, fwdback_target = CENTER, CENTER, CENTER
+            status = "no hands"
+
+            if result.hand_landmarks:
+                for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
+                    label = handedness[0].category_name  # "Left" or "Right" (as seen by MediaPipe)
+                    if label == "Right":
+                        throttle_target, t_label = classify_throttle(landmarks)
+                        status = f"throttle:{t_label}"
+                    else:
+                        leftright_target, fwdback_target, d_label = classify_direction(landmarks)
+                        status = (status + f" | direction:{d_label}") if status != "no hands" else f"direction:{d_label}"
+
+            throttle = throttle_smoother.update(throttle_target)
+            leftright = leftright_smoother.update(leftright_target)
+            fwdback = fwdback_smoother.update(fwdback_target)
+            yaw = CENTER  # channel D reserved, kept neutral
+
+            if ser:
+                ser.write(f"{throttle},{leftright},{fwdback},{yaw}\n".encode())
+
+            cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(frame, f"T:{throttle} LR:{leftright} FB:{fwdback}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.imshow("Hand-Gesture Drone Flight", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        if ser:
+            ser.close()
 
 
 if __name__ == "__main__":
