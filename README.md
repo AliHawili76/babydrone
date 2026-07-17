@@ -1,6 +1,6 @@
 # Hand-Gesture Drone Flight (Wi-Fi / Raspberry Pi version)
 
-CSIS-418 | Team Ginyard International Co.
+CSIS-418
 
 **This replaces the earlier Pico + USB serial + MCP4728 design entirely.**
 Everything in your old `babydrone` repo's `pico/` folder no longer applies —
