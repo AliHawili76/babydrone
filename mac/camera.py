@@ -4,7 +4,7 @@ import cv2
 
 
 class Camera:
-    def __init__(self, index=0, width=640, height=480):
+    def __init__(self, index=0, width=960, height=720):
         self.cap = cv2.VideoCapture(index)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)

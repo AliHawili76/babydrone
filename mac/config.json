@@ -4,8 +4,8 @@
     "port": 5005
   },
   "camera": {
-    "width": 640,
-    "height": 480
+    "width": 960,
+    "height": 720
   },
   "mediapipe": {
     "min_hand_detection_confidence": 0.6,

@@ -24,7 +24,7 @@ from gesture_classifier import (
 )
 from command_controller import CommandController, ARMED, EMERGENCY_STOP
 from udp_sender import UdpLink
-from overlay import draw_overlay
+import overlay
 
 
 def load_config(path):
@@ -49,6 +49,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    overlay.SHOW_LANDMARKS = args.show_landmarks
     pi_host = args.pi_host or cfg["network"]["pi_host"]
     port = args.port or cfg["network"]["port"]
     throttle_rate = args.throttle_rate or cfg["control"]["throttle_rate"]
@@ -149,7 +150,13 @@ def main():
                 fps_count = 0
                 fps_t0 = time.monotonic()
 
-            draw_overlay(
+            if overlay.SHOW_LANDMARKS:
+                if right_landmarks is not None:
+                    overlay.draw_hand_skeleton(frame, right_landmarks, (60, 180, 255))
+                if left_landmarks is not None:
+                    overlay.draw_hand_skeleton(frame, left_landmarks, (120, 240, 120))
+
+            overlay.draw_overlay(
                 frame,
                 right_hand_present=right_landmarks is not None,
                 left_hand_present=left_landmarks is not None,
@@ -162,6 +169,8 @@ def main():
                 fps=fps,
             )
             cv2.imshow("Hand-Gesture Drone Flight", frame)
+            if cv2.getWindowProperty("Hand-Gesture Drone Flight", cv2.WND_PROP_VISIBLE) < 1:
+                break
 
             log_writer.writerow([
                 time.time(), right_landmarks is not None, left_landmarks is not None,
