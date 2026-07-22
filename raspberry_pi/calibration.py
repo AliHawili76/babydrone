@@ -1,11 +1,12 @@
-"""Calibration file loading and axis mapping — spec section 15."""
+"""Loads calibration.json and converts -1..1 / 0..1 commands into actual DAC codes."""
 
 import json
 
 
 def map_bipolar_axis(command: float, negative_code: int, centre_code: int, positive_code: int) -> int:
-    """command: -1.0..1.0. Piecewise around centre, handles asymmetric
-    and/or reversed ranges."""
+    """command is -1.0..1.0. Maps it in two pieces (negative side and positive
+    side separately around centre) so it still works if the ranges aren't
+    symmetric or the wiring makes "positive" the smaller code number."""
     command = max(-1.0, min(1.0, command))
     if command >= 0:
         return round(centre_code + command * (positive_code - centre_code))
@@ -13,6 +14,7 @@ def map_bipolar_axis(command: float, negative_code: int, centre_code: int, posit
 
 
 def map_throttle(command: float, minimum_code: int, maximum_code: int) -> int:
+    # throttle is simpler than pitch/roll, just 0..1 straight to min..max, no centre point
     command = max(0.0, min(1.0, command))
     return round(minimum_code + command * (maximum_code - minimum_code))
 
@@ -30,7 +32,7 @@ class Calibration:
         self.data = self._load()
 
     def is_complete(self):
-        """True only once every placeholder has been replaced (no nulls)."""
+        """Just checks nobody left a null in there — i.e. did we actually fill in real values yet."""
         for axis in self.data.values():
             for v in axis.values():
                 if v is None:

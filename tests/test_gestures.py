@@ -1,7 +1,7 @@
 """
-Gesture classification tests — spec section 22.
-Uses synthetic landmarks (simple objects with .x/.y) instead of a real
-camera or MediaPipe, so these run without any hardware.
+Tests for the gesture classifier. Faking the hand landmarks with plain
+objects (just need .x/.y) instead of pulling in a real camera or MediaPipe,
+so these run fast and don't need any hardware hooked up.
 """
 
 import sys
@@ -14,6 +14,7 @@ from gesture_classifier import (  # noqa: E402
     classify_right_hand, classify_left_hand, GestureDebouncer,
     THROTTLE_UP, THROTTLE_DOWN, THROTTLE_HOLD, RIGHT_UNKNOWN,
     ROLL_LEFT, ROLL_RIGHT, PITCH_FORWARD, PITCH_BACKWARD, DIRECTION_NEUTRAL,
+    right_hand_diagnostics, left_hand_diagnostics,
 )
 
 
@@ -22,7 +23,8 @@ def lm(x, y):
 
 
 def make_hand(overrides):
-    """21 landmarks, default = closed fist at wrist (0.5, 0.5)."""
+    """Makes a fake 21-landmark hand — everything starts bunched up at the
+    wrist (0.5, 0.5) and you override whichever points you actually care about."""
     base = [lm(0.5, 0.5) for _ in range(21)]
     for i, (x, y) in overrides.items():
         base[i] = lm(x, y)
@@ -30,7 +32,7 @@ def make_hand(overrides):
 
 
 def right_fingers_up():
-    # base (MCP) at y=0.5, tip above (smaller y = up), for index/middle/ring/pinky
+    # knuckle at y=0.5, tip above it (smaller y = higher up) for all 4 fingers
     return make_hand({
         5: (0.45, 0.5), 8: (0.45, 0.2),
         9: (0.50, 0.5), 12: (0.50, 0.2),
@@ -51,8 +53,8 @@ def right_fingers_down():
 
 
 def right_fist():
-    # Curled fist: tips pulled in close to the wrist, well inside the
-    # mcp radius -> low tip-to-wrist/mcp-to-wrist ratio (< 1.3).
+    # curled up fist — tips pulled way in close to the wrist, so the
+    # tip-to-wrist / knuckle-to-wrist ratio comes out low (under 1.3)
     return make_hand({
         5: (0.40, 0.40), 8: (0.48, 0.47),
         9: (0.50, 0.35), 12: (0.50, 0.45),
@@ -62,9 +64,9 @@ def right_fist():
 
 
 def folded_fingers_base():
-    """Main fingers folded per the direction-based check used by the
-    LEFT hand classifier (tip not above pip not above mcp). Distinct
-    from right_fist() above, which uses a distance-ratio check instead."""
+    """All 4 main fingers folded down, using the "tip not above pip not
+    above mcp" check the LEFT hand classifier uses (different from
+    right_fist() above, which checks distance ratio instead)."""
     return make_hand({
         5: (0.45, 0.5), 6: (0.45, 0.55), 8: (0.45, 0.6),
         9: (0.50, 0.5), 10: (0.50, 0.55), 12: (0.50, 0.6),
@@ -141,6 +143,47 @@ def test_left_index_middle_is_backward():
 
 def test_left_open_palm_is_neutral():
     assert classify_left_hand(left_open_palm()) == DIRECTION_NEUTRAL
+
+
+def test_right_hand_diagnostics_fingers_up_has_positive_margin():
+    diag = right_hand_diagnostics(right_fingers_up())
+    assert diag["up_count"] == 4
+    assert diag["margin_deg"] > 0
+    assert diag["openness_ratio"] > 1.3
+
+
+def test_right_hand_diagnostics_fist_has_positive_openness_margin():
+    diag = right_hand_diagnostics(right_fist())
+    assert diag["openness_ratio"] < 1.3
+    assert diag["openness_margin"] > 0
+
+
+def test_right_hand_diagnostics_does_not_alter_classification():
+    hand = right_fingers_down()
+    before = classify_right_hand(hand)
+    right_hand_diagnostics(hand)
+    assert classify_right_hand(hand) == before == THROTTLE_DOWN
+
+
+def test_left_hand_diagnostics_thumb_left_has_positive_margin():
+    diag = left_hand_diagnostics(left_thumb_left())
+    assert diag["all_main_folded"] is True
+    assert diag["thumb_extended"] is True
+    assert diag["thumb_margin_deg"] > 0
+
+
+def test_left_hand_diagnostics_open_palm_not_folded():
+    diag = left_hand_diagnostics(left_open_palm())
+    assert diag["index_extended"] is True
+    assert diag["middle_extended"] is True
+    assert diag["all_main_folded"] is False
+
+
+def test_left_hand_diagnostics_does_not_alter_classification():
+    hand = left_thumb_right()
+    before = classify_left_hand(hand)
+    left_hand_diagnostics(hand)
+    assert classify_left_hand(hand) == before == ROLL_RIGHT
 
 
 def test_debouncer_holds_until_stable_duration():

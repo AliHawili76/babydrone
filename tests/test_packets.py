@@ -1,4 +1,4 @@
-"""Packet validation tests — spec section 22, 'Network tests'."""
+"""Tests for validate_packet() — making sure garbage/malicious packets get rejected."""
 
 import sys
 import os

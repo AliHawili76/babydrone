@@ -1,4 +1,4 @@
-"""Camera capture wrapper — MacBook built-in camera."""
+"""Thin wrapper around cv2.VideoCapture for the MacBook's built-in camera."""
 
 import cv2
 

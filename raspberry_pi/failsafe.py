@@ -1,11 +1,9 @@
 """
-Watchdog and failsafe — spec section 17.
-
-Independent safety authority on the Pi: does not trust the Mac to
-behave correctly. If no valid packet arrives within timeout_ms, pitch
-and roll centre immediately and throttle ramps down gradually. Exiting
-FAILSAFE requires several consecutive valid, armed packets — one
-packet reappearing is not enough.
+The watchdog/failsafe logic — this is the Pi's own safety net, it doesn't
+just trust whatever the Mac tells it. If packets stop arriving (timeout_ms),
+pitch/roll snap back to centre right away and throttle ramps down slowly
+instead of cutting instantly. Getting OUT of failsafe needs several good
+packets in a row, not just one — don't want it flapping in and out.
 """
 
 DISARMED = "DISARMED"
@@ -37,11 +35,13 @@ class Watchdog:
             return
 
         if self.state == FAILSAFE:
+            # need required_consecutive_valid good packets in a row before we trust it again
             self.consecutive_valid += 1
             if armed and self.consecutive_valid >= self.required_consecutive_valid:
                 self.state = ARMED
                 self.consecutive_valid = 0
         elif self.state == EMERGENCY_STOP:
+            # only way out of e-stop is an explicit disarm from the mac side
             if not armed:
                 self.state = DISARMED
         else:
@@ -49,10 +49,10 @@ class Watchdog:
             self.consecutive_valid += 1
 
     def tick(self, now, dt, current_throttle_target):
-        """Call every loop iteration. Returns (state, throttle_override).
-        throttle_override is None unless in FAILSAFE, in which case the
-        caller should use it instead of the packet's throttle value, and
-        should force pitch/roll to 0 regardless."""
+        """Call this every loop. Returns (state, throttle_override) — the
+        override is None unless we're in FAILSAFE, in which case use THAT
+        instead of whatever throttle came in the packet, and force pitch/roll
+        to 0 no matter what."""
         if self.last_valid_time is None:
             return self.state, None
 
@@ -69,9 +69,9 @@ class Watchdog:
         return self.state, None
 
     def record_i2c_failure(self):
-        """Returns True if the failure threshold was just crossed and the
-        caller should enter a safe state (centre pitch/roll, reduce
-        throttle, disarm) per spec."""
+        """Returns True once we've hit the failure threshold — that's the
+        signal to the caller to go to a safe state (centre pitch/roll, cut
+        throttle, disarm)."""
         self.i2c_fail_count += 1
         if self.i2c_fail_count >= self.i2c_fail_threshold:
             self.state = DISARMED

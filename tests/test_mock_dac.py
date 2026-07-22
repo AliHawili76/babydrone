@@ -1,6 +1,5 @@
-"""Mock DAC tests — spec section 22, 'Raspberry Pi mock tests'.
-Lets networking/failsafe logic be verified before real I2C hardware
-is connected."""
+"""Tests for the mock DAC + calibration, so I can check the networking/
+failsafe logic works before I've actually got real I2C hardware wired up."""
 
 import sys
 import os

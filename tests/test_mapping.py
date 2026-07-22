@@ -1,4 +1,4 @@
-"""Calibration mapping tests — spec section 22."""
+"""Tests for the calibration/axis-mapping math (command value -> DAC code)."""
 
 import sys
 import os
@@ -41,8 +41,8 @@ def test_bipolar_full_negative():
 
 
 def test_bipolar_asymmetric_ranges():
-    # centre not halfway between negative/positive — real hardware often
-    # isn't symmetric, this is the reason map_bipolar_axis is piecewise
+    # centre isn't halfway between the two ends here — real DACs are often
+    # like this, which is exactly why map_bipolar_axis does it in two pieces
     result_pos = map_bipolar_axis(0.5, 900, 2048, 3100)
     result_neg = map_bipolar_axis(-0.5, 900, 2048, 3100)
     assert result_pos == 2048 + 0.5 * (3100 - 2048)
@@ -56,7 +56,7 @@ def test_bipolar_clamps():
 
 
 def test_bipolar_reversed_direction():
-    # negative_code > centre_code > positive_code is valid — the
-    # calibration file determines actual voltage direction, not the code
+    # this is fine even though negative_code > centre_code > positive_code —
+    # the calibration file is what decides actual voltage direction, not the numbers
     result = map_bipolar_axis(1.0, 3000, 2000, 1000)
     assert result == 1000

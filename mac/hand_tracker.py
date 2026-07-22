@@ -1,14 +1,15 @@
 """
-MediaPipe Hand Landmarker wrapper.
+Wraps MediaPipe's Hand Landmarker.
 
-Runs in LIVE_STREAM mode per spec section 4. Since LIVE_STREAM is
-callback-based and may drop frames, the main loop should always read
-get_latest() rather than expecting one result per camera frame.
+Runs in LIVE_STREAM mode, which is callback-based and can drop frames, so
+don't assume you get exactly one result per camera frame — just always
+grab whatever's latest.
 
-Also implements basic handedness continuity (spec section 5): if
-MediaPipe's handedness label briefly swaps or a hand drops out for a
-frame or two, we keep the previous role assignment based on wrist
-position proximity rather than instantly reassigning control roles.
+Also does a bit of "handedness continuity": MediaPipe's left/right guess
+can flicker for a frame or two, especially when a hand is entering/leaving
+frame. Instead of instantly trusting a flipped label (which would suddenly
+swap which hand controls what), we check if the new hand is close to where
+the old one of that role was and keep the old role assignment if so.
 """
 
 import math
@@ -56,8 +57,11 @@ class HandTracker:
         self._frame_idx += 1
 
     def get_latest_hands(self):
-        """Returns list of (role, landmarks) where role is 'Left' or
-        'Right', using continuity to smooth over brief handedness flips."""
+        """Returns [(role, raw_label, landmarks), ...] where role is 'Left'
+        or 'Right' (after continuity smoothing) and raw_label is whatever
+        MediaPipe actually guessed for that hand this frame — exposed
+        separately so callers can tell when continuity logic overrode
+        MediaPipe's own label (role != raw_label)."""
         result = self._latest
         if result is None or not result.hand_landmarks:
             return []
@@ -65,15 +69,16 @@ class HandTracker:
         now = time.time()
         raw_hands = []
         for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
-            label = handedness[0].category_name  # MediaPipe's raw guess
+            label = handedness[0].category_name  # whatever mediapipe guessed
             wrist = landmarks[0]
             raw_hands.append((label, (wrist.x, wrist.y), landmarks))
 
         assigned = []
         used_roles = set()
 
-        # First pass: try to match each detected hand to its previous role
-        # by wrist proximity, so a brief label flip doesn't switch roles.
+        # try to match each hand we see to whichever role it was last time,
+        # based on how close the wrist is — that way a label flicker for one
+        # frame doesn't suddenly swap which hand is controlling what
         for label, wrist_pos, landmarks in raw_hands:
             best_role = None
             best_dist = None
@@ -92,10 +97,10 @@ class HandTracker:
 
             role = best_role if best_role else label
             if role not in ("Left", "Right"):
-                role = label  # fall back to raw label if something odd
+                role = label  # weird edge case, just trust mediapipe's label if we get here
             used_roles.add(role)
             self._role_history[role] = (wrist_pos[0], wrist_pos[1], now)
-            assigned.append((role, landmarks))
+            assigned.append((role, label, landmarks))
 
         return assigned
 

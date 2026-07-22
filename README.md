@@ -43,6 +43,47 @@ python main.py --dry-run --show-landmarks
 ```
 Controls: `a` = arm, `d` = disarm, `space` = emergency stop, `q` = quit.
 
+### Ground-truth controls (for evaluation/reporting)
+
+To compute accuracy, precision/recall, and confusion matrices, the logger
+needs to know not just what the system *detected* but what the tester was
+*actually doing*. Two more keys — separate from the flight controls above —
+let you tag that during a live session:
+
+| Key | Right-hand target | Key | Left-hand target |
+|---|---|---|---|
+| `1` | THROTTLE_UP | `f` | PITCH_FORWARD |
+| `2` | THROTTLE_DOWN | `b` | PITCH_BACKWARD |
+| `3` | THROTTLE_HOLD | `l` | ROLL_LEFT |
+| `0` | clear (NONE) | `r` | ROLL_RIGHT |
+| | | `n` | DIRECTION_NEUTRAL |
+| | | `x` | clear (NONE) |
+
+Both targets default to `NONE` until you press one of these keys, so frames
+recorded before you've set up a test aren't silently mislabeled. The
+current target(s) are shown on the HUD and in the `--test-label` legend
+printed at startup. Every CSV row also gets a `test_condition` column —
+pass `--test-label <name>` to tag a whole session (e.g.
+`--test-label low-light-3m`) so results can be grouped by lighting,
+background, or distance later.
+
+Typical workflow: start a session with `--test-label <condition>`, hold a
+gesture, press the matching ground-truth key, let a few seconds of frames
+log, switch gestures/keys, repeat. `q` to end the session.
+
+### Analyzing a test session
+
+```
+pip install -r mac/requirements-analysis.txt   # one-time, offline analysis only
+python tools/analyze_gesture_log.py --logs logs/*.csv
+```
+Compares each hand's ground-truth target against its debounced (`*_stable`)
+output, printing accuracy/precision/recall/F1 to stdout and saving
+`confusion_matrix_right.png` / `confusion_matrix_left.png` (pass
+`--out-dir` to change where they're written). `--logs` accepts one or more
+paths or glob patterns, so you can pass a single file, several files, or a
+pattern like `logs/*.csv` to combine multiple test sessions.
+
 ## Setup — Raspberry Pi side
 
 ```
@@ -80,9 +121,9 @@ pip install pytest --break-system-packages   # or inside a venv, no flag needed
 python3 -m pytest tests/ -v
 ```
 
-All 42 tests run without a camera, network, or real I2C hardware —
+All 59 tests run without a camera, network, or real I2C hardware —
 they test the pure logic (gesture classification, calibration math,
-packet validation, mock DAC) in isolation.
+packet validation, mock DAC, gesture-log analysis, target tracking) in isolation.
 
 ## What's different from the reference repo (pattssun/iDrone)
 

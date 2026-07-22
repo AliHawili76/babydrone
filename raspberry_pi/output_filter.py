@@ -1,6 +1,6 @@
-"""EMA output smoothing on the Pi side — spec section 16.
-Runs on normalized command values (throttle 0..1, pitch/roll -1..1),
-BEFORE calibration mapping to DAC codes."""
+"""Simple exponential moving average smoothing for the outgoing commands.
+Runs on the 0..1 / -1..1 values BEFORE they get turned into DAC codes,
+just to keep the servos from jumping around too sharply."""
 
 
 class AxisFilter:

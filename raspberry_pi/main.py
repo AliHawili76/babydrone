@@ -1,5 +1,5 @@
 """
-Raspberry Pi main program — Hand-Gesture Drone Flight
+Pi side main loop — Hand-Gesture Drone Flight
 CSIS-418 | Team Ginyard International Co.
 
 Usage:
@@ -117,6 +117,7 @@ def main():
 
             state, throttle_override = watchdog.tick(now, 1.0 / 20.0, last_throttle_target)
 
+            # figure out what to actually send to the DACs this loop, based on current state
             if state == EMERGENCY_STOP:
                 throttle_target, pitch_target, roll_target = 0.0, 0.0, 0.0
             elif state == FAILSAFE:
@@ -150,7 +151,7 @@ def main():
             elif args.verbose and int(now * 2) % 40 == 0:
                 print("[WAIT] calibration incomplete, not driving DACs yet")
 
-            if now - last_status_send >= 0.3:  # ~3Hz, within spec's 2-5Hz
+            if now - last_status_send >= 0.3:  # sending back at ~3Hz, don't need it faster than that
                 status = {
                     "version": 1,
                     "sequence_received": last_sequence,

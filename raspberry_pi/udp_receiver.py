@@ -1,8 +1,10 @@
 """
-UDP receiver — spec sections 11 (validation) and 12 (status packet).
+Listens for UDP packets from the Mac and checks they're actually valid
+before trusting them.
 
-validate_packet() is a pure function (dict in, (ok, reason, clamped_packet)
-out) so it can be unit tested without a real socket.
+validate_packet() is just a plain function (dict in, (ok, reason, packet)
+out) — kept it separate from the socket stuff so it's easy to unit test
+without needing an actual network connection.
 """
 
 import json
@@ -20,11 +22,12 @@ SUPPORTED_VERSION = 1
 
 def validate_packet(packet: dict, *, last_sequence=None, current_session=None,
                      is_armed=False):
-    """Returns (ok: bool, reason: str, packet: dict|None).
-    On success, numeric fields are clamped into range."""
+    """Returns (ok, reason, packet). If ok, the returned packet has its
+    numeric fields clamped into valid range just in case."""
     if not isinstance(packet, dict):
         return False, "not a JSON object", None
 
+    # basic shape check first — make sure every field we need is there and is the right type
     for field, expected_type in REQUIRED_FIELDS.items():
         if field not in packet:
             return False, f"missing field: {field}", None
@@ -34,6 +37,8 @@ def validate_packet(packet: dict, *, last_sequence=None, current_session=None,
     if packet["version"] != SUPPORTED_VERSION:
         return False, f"unsupported version: {packet['version']}", None
 
+    # catch NaN/inf before they sneak into a range check below (NaN comparisons are always False,
+    # so without this a NaN throttle would silently pass the 0..1 range check)
     for field in ("throttle", "pitch", "roll"):
         v = packet[field]
         if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
@@ -46,9 +51,11 @@ def validate_packet(packet: dict, *, last_sequence=None, current_session=None,
     if not (-1.0 <= packet["roll"] <= 1.0):
         return False, "roll out of range", None
 
+    # reject replayed/out-of-order packets
     if last_sequence is not None and packet["sequence"] <= last_sequence:
         return False, "old or duplicate sequence number", None
 
+    # while armed, a sudden session change is suspicious (could be a stale/rogue sender) — block it
     if is_armed and current_session is not None and packet["session"] != current_session:
         return False, "unexpected session change while armed", None
 
@@ -68,8 +75,8 @@ class UdpReceiver:
         self.last_sender_addr = None
 
     def poll(self):
-        """Returns list of (raw_dict_or_None, source_addr, parse_error)
-        for all packets currently waiting."""
+        """Grabs everything currently waiting on the socket. Returns a list
+        of (packet_or_None, addr, error) tuples."""
         results = []
         try:
             while True:

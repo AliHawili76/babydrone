@@ -1,4 +1,4 @@
-"""Preview window overlay — spec section 21."""
+"""Draws the HUD overlay on the preview window (gauges, badges, status text)."""
 
 import cv2
 
@@ -34,13 +34,11 @@ _LEFT_COLOR = {
 
 
 def _draw_rounded_panel(frame, x0, y0, x1, y1, fill, border, alpha=0.78, radius=14):
-    """Draw a translucent rounded rectangle that works well as a HUD panel.
+    """Draws a see-through rounded rectangle, used for the HUD panel and badges.
 
-    `radius` must stay well under half of (y1 - y0) — the corner math draws
-    the shape's flat edges at y0+radius/y1-radius, and if those two lines
-    end up only a few pixels apart (short shape, radius too big) they visually
-    merge into a solid bar across the middle. Short shapes like badges need a
-    smaller radius than the tall main panel.
+    Note: radius has to be well under half of (y1 - y0) or the corners
+    start overlapping and it just looks like a solid bar. Learned this the
+    hard way on the small badges before I made the radius smaller for those.
     """
     overlay = frame.copy()
 
@@ -61,13 +59,13 @@ def _draw_rounded_panel(frame, x0, y0, x1, y1, fill, border, alpha=0.78, radius=
 
 
 def _draw_bar_track(frame, x, y, width, height):
-    """Shared background/border for every gauge bar, so they all share one look."""
+    """Just the empty background/border for a gauge bar, shared by both bar types below."""
     cv2.rectangle(frame, (x, y), (x + width, y + height), TRACK_COLOR, -1, cv2.LINE_AA)
     cv2.rectangle(frame, (x, y), (x + width, y + height), PANEL_BORDER, 1, cv2.LINE_AA)
 
 
 def _draw_percent_bar(frame, x, y, value, width, height, color):
-    """Left-anchored fill for a 0..1 value (throttle) — full width at 100%."""
+    """0-1 value bar (throttle) that fills left to right."""
     _draw_bar_track(frame, x, y, width, height)
     value = max(0.0, min(1.0, value))
     fill_w = int(round(value * width))
@@ -76,7 +74,7 @@ def _draw_percent_bar(frame, x, y, value, width, height, color):
 
 
 def _draw_centered_bar(frame, x, y, value, width, height, color):
-    """Center-anchored fill for a -1..1 value (pitch/roll), same track/height as the percent bar."""
+    """-1 to 1 value bar (pitch/roll) that fills out from the middle instead of the left edge."""
     _draw_bar_track(frame, x, y, width, height)
     center_x = x + width // 2
     cv2.line(frame, (center_x, y), (center_x, y + height), (120, 120, 128), 1, cv2.LINE_AA)
@@ -90,7 +88,7 @@ def _draw_centered_bar(frame, x, y, value, width, height, color):
 
 
 def _draw_badge(frame, x, y, text, color, border):
-    """Draw a small badge/pill so state is easier to scan."""
+    """Little pill-shaped badge, makes state stuff easier to spot at a glance."""
     (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 0.52, 1)
     pad_x = 12
     pad_y = 8
@@ -104,7 +102,7 @@ def _draw_badge(frame, x, y, text, color, border):
 
 
 def draw_hand_skeleton(frame, landmarks, color):
-    """Draw debug skeletons for a hand using MediaPipe's standard connections."""
+    """Draws the little skeleton lines/dots over a hand, using MediaPipe's connection list."""
     if not landmarks or len(landmarks) < 21:
         return
 
@@ -126,17 +124,18 @@ def draw_hand_skeleton(frame, landmarks, color):
 def draw_overlay(frame, *, right_hand_present, left_hand_present,
                   right_raw, right_stable, left_raw, left_stable,
                   throttle, pitch, roll, state, pi_connected,
-                  status_age_s, fps):
-    """Render a HUD-style overlay with a dark translucent panel and simple gauges.
+                  status_age_s, fps, right_raw_label=None, left_raw_label=None,
+                  round_trip_s=None):
+    """Draws the whole HUD panel (dark box + gauges + badges + text).
 
-    This is a two-pass layout: first every line/gauge/badge is appended to
-    `rows` and walked once top-to-bottom to work out where each one sits and
-    how wide/tall the whole block is. Only then is the panel background
-    drawn (sized to fit exactly what was laid out), and only after that do
-    we paint the rows on top, reusing the same positions. Because every row
-    advances one shared y-cursor regardless of its kind, nothing can land on
-    top of anything else, and the panel can never be too small for its
-    own content.
+    This works in two passes: first I build up a list of "rows" (text,
+    gauge, or badge) and walk through them once just to figure out where
+    everything goes and how big the panel needs to be. THEN I draw the
+    panel background sized to fit, and THEN draw the rows on top in the
+    same positions. Doing it this way (one shared y-cursor moving down for
+    every row, no matter what kind it is) means rows can't ever overlap
+    and the panel is never too small — had an annoying bug earlier where
+    stuff was overlapping before I switched to this approach.
     """
     rows = []
 
@@ -149,13 +148,23 @@ def draw_overlay(frame, *, right_hand_present, left_hand_present,
     def badge_row(text, fill, border):
         rows.append({"kind": "badge", "text": text, "fill": fill, "border": border})
 
-    # ---- content, in the order it should appear top to bottom ----
+    # ---- what goes in the panel, top to bottom ----
     right_color = GREEN if right_hand_present else ORANGE
-    text_row(f"Right: {'detected' if right_hand_present else 'missing'}", right_color)
+    right_status = f"Right: {'detected' if right_hand_present else 'missing'}"
+    if right_hand_present and right_raw_label is not None:
+        # if mediapipe's own guess disagrees with the role we assigned, that's
+        # continuity correction kicking in — worth seeing live during testing
+        right_status += f" (raw: {right_raw_label})" if right_raw_label == "Right" \
+            else f" (raw: {right_raw_label}, corrected)"
+    text_row(right_status, right_color)
     text_row(f"raw={right_raw}  stable={right_stable}", _THROTTLE_COLOR.get(right_stable, GRAY))
 
     left_color = GREEN if left_hand_present else ORANGE
-    text_row(f"Left: {'detected' if left_hand_present else 'missing'}", left_color)
+    left_status = f"Left: {'detected' if left_hand_present else 'missing'}"
+    if left_hand_present and left_raw_label is not None:
+        left_status += f" (raw: {left_raw_label})" if left_raw_label == "Left" \
+            else f" (raw: {left_raw_label}, corrected)"
+    text_row(left_status, left_color)
     text_row(f"raw={left_raw}  stable={left_stable}", _LEFT_COLOR.get(left_stable, GRAY))
 
     gauge_row("Throttle", throttle, GREEN, mode="percent")
@@ -171,12 +180,14 @@ def draw_overlay(frame, *, right_hand_present, left_hand_present,
     badge_row(f"STATE: {state}", state_color, (255, 255, 255))
     badge_row(f"PI: {'CONNECTED' if pi_connected else 'NO STATUS'}", GREEN if pi_connected else RED, (255, 255, 255))
 
+    if round_trip_s is not None:
+        text_row(f"Round-trip: {round_trip_s * 1000:.0f} ms", GRAY, font_scale=0.45)
+
     if status_age_s is not None:
         text_row(f"Last PI status: {status_age_s * 1000:.0f} ms ago", GRAY, font_scale=0.45)
     text_row(f"FPS: {fps:.1f}", GRAY, font_scale=0.5)
 
-    # ---- layout pass: walk the rows once, top to bottom, computing where ----
-    # ---- each one lands and how wide/tall the whole block ends up being. ----
+    # ---- pass 1: figure out where each row goes and how big everything is ----
     margin_x = 24
     margin_top = 24
     bottom_margin = 16
@@ -184,14 +195,14 @@ def draw_overlay(frame, *, right_hand_present, left_hand_present,
     text_row_h = 24
     gauge_label_h = 18
     gauge_bar_h = 12
-    gauge_bar_gap = 8   # padding between the bar and its value text
+    gauge_bar_gap = 8   # space between the bar and the value text under it
     gauge_value_h = 24
     bar_width = 140
-    badge_gap = 8       # breathing room after a badge before the next row
+    badge_gap = 8       # extra space after a badge so the next row isn't crammed in
 
     y = margin_top
     max_content_right = margin_x
-    layout = []  # (row, y_top) — y_top is the top of that row's slot
+    layout = []  # (row, y_top) pairs, remembering where pass 1 put each row
 
     for row in rows:
         layout.append((row, y))
@@ -215,13 +226,13 @@ def draw_overlay(frame, *, right_hand_present, left_hand_present,
 
     content_bottom = y
 
-    # ---- now that we know exactly how much space is needed, size the panel to it ----
+    # ---- now we know how big the panel needs to be, so draw it ----
     panel_x0, panel_y0 = 12, 12
     panel_x1 = max_content_right + right_margin
     panel_y1 = content_bottom + bottom_margin
     _draw_rounded_panel(frame, panel_x0, panel_y0, panel_x1, panel_y1, PANEL_FILL, PANEL_BORDER, alpha=0.78)
 
-    # ---- draw pass: same rows, same y positions computed above ----
+    # ---- pass 2: actually draw everything at the positions from pass 1 ----
     for row, y_top in layout:
         if row["kind"] == "text":
             baseline_y = y_top + 16

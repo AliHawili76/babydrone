@@ -1,11 +1,11 @@
 """
-Command controller — spec sections 6 (throttle integration), 8
-(simultaneous control), 10 (arming state machine).
+Turns gestures into actual throttle/pitch/roll numbers, plus the arm/disarm/
+emergency-stop state machine.
 
-Keeps three independent axis commands: throttle (0.0-1.0, persistent,
-rate-integrated), pitch and roll (-1.0..1.0, magnitude-based, not
-integrated). Right and left hand gestures are processed independently —
-no combined gesture classes.
+Throttle is 0-1 and "sticky" — it integrates over time (holding the gesture
+keeps changing it), while pitch/roll are -1 to 1 and just snap straight to
+a value based on whatever gesture is currently held. Right and left hands
+are handled completely separately, there's no combined gesture logic.
 """
 
 import time
@@ -63,25 +63,26 @@ class CommandController:
         self._last_update = now
 
         if self.state in (DISARMED, EMERGENCY_STOP):
-            # Commands still computed for display, but not meaningful
-            # until armed — main.py is responsible for not transmitting
-            # non-zero commands while disarmed.
+            # still crunching the numbers here even while disarmed, just so the
+            # HUD has something to show. main.py is the one that actually makes
+            # sure we don't send non-zero commands while disarmed.
             pass
 
-        # Right hand -> throttle target (persistent, rate-integrated)
+        # right hand controls throttle, and it "remembers" — holding UP keeps climbing
         if right_gesture == THROTTLE_UP:
             self.throttle_target += self.throttle_rate * dt
         elif right_gesture == THROTTLE_DOWN:
             self.throttle_target -= self.throttle_rate * dt
         elif right_gesture == THROTTLE_HOLD:
-            pass  # unchanged
+            pass  # leave it where it is
         elif right_gesture == RIGHT_MISSING:
+            # lost track of the hand entirely, ease throttle back down instead of just freezing it
             self.throttle_target -= self.right_missing_descent_rate * dt
-        # RIGHT_UNKNOWN -> hold current throttle briefly (no-op, same as HOLD)
+        # RIGHT_UNKNOWN just falls through and holds too, same as THROTTLE_HOLD
 
         self.throttle_target = max(0.0, min(1.0, self.throttle_target))
 
-        # Left hand -> pitch/roll (not integrated, just magnitude-based)
+        # left hand controls pitch/roll — these don't accumulate, they just snap to a value
         if left_gesture == PITCH_FORWARD:
             self.pitch = self.direction_strength
         elif left_gesture == PITCH_BACKWARD:
@@ -90,7 +91,7 @@ class CommandController:
             self.roll = -self.direction_strength
         elif left_gesture == ROLL_RIGHT:
             self.roll = self.direction_strength
-        else:  # DIRECTION_NEUTRAL, LEFT_UNKNOWN, LEFT_MISSING
+        else:  # DIRECTION_NEUTRAL, LEFT_UNKNOWN, LEFT_MISSING all just mean "do nothing"
             self.pitch = 0.0
             self.roll = 0.0
 
